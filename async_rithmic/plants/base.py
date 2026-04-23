@@ -544,11 +544,31 @@ class BasePlant(BackgroundTaskMixin):
                         raise RithmicErrorResponse(f"Rithmic returned an error={MessageToDict(response)} for the request={request}")
 
                     else:
-                        if response.template_id in [11, 15, 114, 301]:
-                            # We expect a single response containing `rp_code` for these endpoints
+                        # Store the terminal response when it carries the
+                        # caller's data rather than being a pure sentinel.
+                        #
+                        # Original allow-list [11, 15, 114, 301] is for login
+                        # flows where the terminal IS the data.
+                        #
+                        # 313, 315, 317, 331 are order-path single-response
+                        # endpoints (submit / modify / cancel / bracket). Prior
+                        # to this fix, under concurrent submit_order load on
+                        # one Rithmic session, the terminal 313 with rp_code=0
+                        # was dropped by mark_complete before being stored, so
+                        # send_and_collect returned an empty list. Observed on
+                        # live_propfirms 2026-04-23 09:01 ET with 3 concurrent
+                        # HAL place_stop_order calls — all 3 got "Rithmic empty
+                        # response" errors and no orders reached Rithmic.
+                        #
+                        # List / multi-response templates (303 list_accounts,
+                        # 305/307 rms, 311 trade_routes, 339/341 brackets, 352
+                        # list_orders, etc.) keep the old behaviour: the
+                        # terminal is a pure sentinel (rp_code=0, no data) and
+                        # must NOT be appended — prior data responses were
+                        # already stored via the `else` branch below.
+                        _terminal_carries_data = {11, 15, 114, 301, 313, 315, 317, 331}
+                        if response.template_id in _terminal_carries_data:
                             self.request_manager.handle_response(response)
-
-                        # Else: multiple response + a sentinel message with `rp_code`
                         self.request_manager.mark_complete(request_id)
                 else:
                     self.request_manager.handle_response(response)
