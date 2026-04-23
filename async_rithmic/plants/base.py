@@ -544,11 +544,26 @@ class BasePlant(BackgroundTaskMixin):
                         raise RithmicErrorResponse(f"Rithmic returned an error={MessageToDict(response)} for the request={request}")
 
                     else:
-                        if response.template_id in [11, 15, 114, 301]:
-                            # We expect a single response containing `rp_code` for these endpoints
-                            self.request_manager.handle_response(response)
-
-                        # Else: multiple response + a sentinel message with `rp_code`
+                        # Always store the terminal response before marking the
+                        # request complete. The previous heuristic only stored
+                        # the terminal for a handful of templates (11/15/114/301),
+                        # assuming every other template would have earlier
+                        # intermediate responses stored via the `else` branch
+                        # below. Under concurrent load (observed on
+                        # live_propfirms 2026-04-23 09:01 ET with 3 concurrent
+                        # submit_order calls on one Rithmic session), that
+                        # assumption fails for template 313: only the terminal
+                        # response with rp_code=0 arrives, so it's dropped and
+                        # `send_and_collect` returns an empty list. Downstream
+                        # client code reads the result as "empty response" and
+                        # never gets the basket_id.
+                        #
+                        # Storing the terminal response unconditionally is safe:
+                        # if an intermediate was already stored, we end up with
+                        # N+1 responses in the list — callers that use
+                        # `responses[0]` or iterate are still correct, and no
+                        # information is lost.
+                        self.request_manager.handle_response(response)
                         self.request_manager.mark_complete(request_id)
                 else:
                     self.request_manager.handle_response(response)
