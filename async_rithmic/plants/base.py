@@ -536,7 +536,33 @@ class BasePlant(BackgroundTaskMixin):
                 if response.rp_code:
                     if response.rp_code[0] != '0':
                         if response.rp_code[0] == '7':
-                            self.logger.debug(f"Rithmic returned no data for request_id={request_id}")
+                            # rp_code=7 ("no data") on order-path responses
+                            # means Rithmic actively refused the order
+                            # (account locked, daily-loss/drawdown, exchange
+                            # permission, instrument unsubscribed, ...). The
+                            # caller wrapper (e.g. ticker_rithmic.py
+                            # place_stop_order) sees this as an empty list
+                            # return — without this WARNING, the rejection
+                            # reason is invisible above DEBUG. Data-fetch
+                            # endpoints (instrument lookup, historical) also
+                            # legitimately return rp_code=7 for "no data" and
+                            # should stay quiet at DEBUG.
+                            #
+                            # 313 = submit_order ack, 315 = modify_order ack,
+                            # 317 = cancel_order ack, 331 = new_order/bracket
+                            # ack. Same set as _terminal_carries_data below.
+                            _order_path = {313, 315, 317, 331}
+                            if response.template_id in _order_path:
+                                request = self.request_manager.requests.get(request_id)
+                                self.logger.warning(
+                                    f"Rithmic refused order (rp_code=7) "
+                                    f"template_id={response.template_id} "
+                                    f"request_id={request_id} "
+                                    f"response={MessageToDict(response)} "
+                                    f"request={request}"
+                                )
+                            else:
+                                self.logger.debug(f"Rithmic returned no data for request_id={request_id}")
                             self.request_manager.mark_complete(request_id)
                             return True
                         request = self.request_manager.requests.get(request_id)
