@@ -6,6 +6,13 @@ from .base import BasePlant
 from ..enums import SysInfraType, TimeBarType
 from .. import protocol_buffers as pb
 
+# Safety net for a historical replay to finish. The is_last_bar marker arrives via
+# the background _recv_loop/_process_loop and sets the per-(symbol,type) event, so a
+# healthy replay resolves in well under a second; this only fires if a terminal frame
+# was dropped. Generous on purpose so it never false-trips a legitimate replay.
+HISTORY_REPLAY_TIMEOUT = 15.0
+
+
 class HistoryPlant(BasePlant):
     infra_type = SysInfraType.HISTORY_PLANT
 
@@ -69,7 +76,9 @@ class HistoryPlant(BasePlant):
             event = asyncio.Event()
             self.historical_tick_events[key] = event
 
-        await self._send_and_recv_immediate(
+        # Send only — see get_historical_time_bars: don't hold the lock across the reply;
+        # the background loop accumulates ticks and sets the per-symbol event on is_last_bar.
+        await self._send_request(
             template_id=206,
             user_msg=symbol,
             symbol=symbol,
@@ -85,10 +94,11 @@ class HistoryPlant(BasePlant):
         # Wait until all the historical data has been fetched before returning it
         if wait:
             try:
-                await asyncio.wait_for(event.wait(), 5.0)
+                await asyncio.wait_for(event.wait(), HISTORY_REPLAY_TIMEOUT)
             except asyncio.TimeoutError:
-                # No response within 5s — return whatever accumulated (may be empty)
-                pass
+                self.logger.warning(
+                    f"historical tick replay incomplete for {key} after {HISTORY_REPLAY_TIMEOUT}s"
+                )
             finally:
                 self.historical_tick_events.pop(key, None)
 
@@ -110,7 +120,13 @@ class HistoryPlant(BasePlant):
             event = asyncio.Event()
             self.historical_time_bar_events[key] = event
 
-        await self._send_and_recv_immediate(
+        # Send only — do NOT hold the plant lock across the multi-frame reply.
+        # Bars arrive via the background _recv_loop/_process_loop (_on_historical_time_bar
+        # accumulates; the is_last_bar marker sets `event`). The old _send_and_recv_immediate
+        # held the lock across an inline recv loop for the whole ~5s replay, which starved
+        # the heartbeat (send_18) and _recv_loop -> 1011 keepalive disconnect, and its fixed
+        # 5s event-wait fired on every call. See FX5 plans/incidents/amppaper_backfill_2026-05-28.
+        await self._send_request(
             template_id=202,
             symbol=symbol,
             exchange=exchange,
@@ -124,10 +140,11 @@ class HistoryPlant(BasePlant):
         # Wait until all the historical data has been fetched before returning it
         if wait:
             try:
-                await asyncio.wait_for(event.wait(), 5.0)
+                await asyncio.wait_for(event.wait(), HISTORY_REPLAY_TIMEOUT)
             except asyncio.TimeoutError:
-                # No response within 5s — return whatever accumulated (may be empty)
-                pass
+                self.logger.warning(
+                    f"historical time bar replay incomplete for {key} after {HISTORY_REPLAY_TIMEOUT}s"
+                )
             finally:
                 self.historical_time_bar_events.pop(key, None)
 
