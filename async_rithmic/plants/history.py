@@ -10,7 +10,7 @@ from .. import protocol_buffers as pb
 # the background _recv_loop/_process_loop and sets the per-(symbol,type) event, so a
 # healthy replay resolves in well under a second; this only fires if a terminal frame
 # was dropped. Generous on purpose so it never false-trips a legitimate replay.
-HISTORY_REPLAY_TIMEOUT = 15.0
+HISTORY_REPLAY_TIMEOUT = 5.0
 
 
 class HistoryPlant(BasePlant):
