@@ -145,6 +145,61 @@ TEMPLATE_ID_BY_NAME = {
     for template_id, cls in TEMPLATES_MAP.items()
 }
 
+# Rithmic numbers its protobuf fields globally, so a field number names the same field in every
+# message: an unknown template's fields can be labelled from the messages we do know.
+FIELD_NAMES = {}
+for _cls in TEMPLATES_MAP.values():
+    for _f in _cls.DESCRIPTOR.fields:
+        FIELD_NAMES.setdefault(_f.number, _f.name)
+
+UNKNOWN_TEMPLATE_LOG_FIRST = 5     # messages of each unknown template logged with all their fields
+UNKNOWN_TEMPLATE_LOG_EVERY = 100   # after that, one count line every this many
+
+
+def _read_varint(data, i):
+    value, shift = 0, 0
+    while True:
+        b = data[i]
+        i += 1
+        value |= (b & 0x7F) << shift
+        if not b & 0x80:
+            return value, i
+        shift += 7
+
+
+def decode_wire_fields(data):
+    """The fields of a protobuf message whose type is unknown, as (name, value) pairs in wire
+    order: varints as ints, length-delimited values as text when they decode as UTF-8, else hex."""
+    fields, i = [], 0
+    try:
+        while i < len(data):
+            tag, i = _read_varint(data, i)
+            number, wire_type = tag >> 3, tag & 7
+            if wire_type == 0:
+                value, i = _read_varint(data, i)
+            elif wire_type == 2:
+                length, i = _read_varint(data, i)
+                if i + length > len(data):
+                    raise IndexError
+                chunk = bytes(data[i:i + length])
+                i += length
+                try:
+                    value = chunk.decode()
+                except UnicodeDecodeError:
+                    value = chunk.hex()
+            elif wire_type in (1, 5):
+                width = 8 if wire_type == 1 else 4
+                if i + width > len(data):
+                    raise IndexError
+                value, i = bytes(data[i:i + width]).hex(), i + width
+            else:
+                fields.append(('undecodable', bytes(data[i - 1:]).hex()))
+                break
+            fields.append((FIELD_NAMES.get(number, str(number)), value))
+    except IndexError:
+        fields.append(('truncated', bytes(data).hex()))
+    return fields
+
 class BasePlant(BackgroundTaskMixin):
     infra_type = None
 
@@ -156,6 +211,7 @@ class BasePlant(BackgroundTaskMixin):
         self.send_lock = asyncio.Lock()  # SEND lock: serializes ALL websocket writes (incl. heartbeat); concurrent ws.send() is unsafe
         self.recv_lock = asyncio.Lock()  # RECV lock: serializes websocket reads (recv loop + inline-recv) so reads never block the heartbeat send
         self.request_manager = RequestManager(self)
+        self._unknown_templates = defaultdict(int)  # template_id -> messages skipped
 
         # Heartbeats have to be sent every {interval} seconds, unless an update was received
         self.heartbeat_interval = 30
@@ -361,6 +417,8 @@ class BasePlant(BackgroundTaskMixin):
                 buffer = await self.ws.recv()
 
                 response = self._convert_bytes_to_response(buffer)
+                if response is None:
+                    continue
                 self.logger.debug(f"Received message {MessageToDict(response)}")
 
                 if response.template_id != kwargs["template_id"] + 1:
@@ -396,6 +454,8 @@ class BasePlant(BackgroundTaskMixin):
                     buffer = await self._recv()
 
                 response = self._convert_bytes_to_response(buffer)
+                if response is None:
+                    continue
                 self.logger.debug(f"Received message {MessageToDict(response)}")
 
                 if not hasattr(response, "rp_code") or response.template_id != template_id + 1:
@@ -470,9 +530,19 @@ class BasePlant(BackgroundTaskMixin):
         buffer += serialized
         return buffer
 
+    def _skip_unknown_template(self, template_id, raw_data):
+        """A message of a template this library has no class for is skipped, not raised: raising
+        would also abort any request whose reply was being awaited when it arrived."""
+        self._unknown_templates[template_id] += 1
+        n = self._unknown_templates[template_id]
+        if n <= UNKNOWN_TEMPLATE_LOG_FIRST:
+            self.logger.warning(f"Unknown template ID {template_id} skipped (#{n}): {decode_wire_fields(raw_data)}")
+        elif n % UNKNOWN_TEMPLATE_LOG_EVERY == 0:
+            self.logger.warning(f"Unknown template ID {template_id}: {n} messages skipped so far")
+
     def _convert_bytes_to_response(self, buffer):
         """
-        Bytes to Response class conversion
+        Bytes to Response class conversion; None for a template this library does not know
         """
         raw_data = buffer[4:]
 
@@ -482,7 +552,8 @@ class BasePlant(BackgroundTaskMixin):
 
         template_id = base.template_id
         if template_id not in TEMPLATES_MAP:
-            raise Exception(f"Unknown template ID: {template_id}")
+            self._skip_unknown_template(template_id, raw_data)
+            return None
 
         # Parse as specific response class
         response_cls = TEMPLATES_MAP[template_id]
