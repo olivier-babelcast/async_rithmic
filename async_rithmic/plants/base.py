@@ -20,6 +20,13 @@ from ..helpers.connectivity import DisconnectionHandler, try_to_reconnect
 from ..helpers.concurrency import try_acquire_lock
 from ..helpers.background_task_mixin import BackgroundTaskMixin
 
+CREDENTIAL_FIELDS = frozenset({"password"})
+
+
+def redact(fields: dict) -> dict:
+    """A request's fields for a log line or an error message, with every credential masked."""
+    return {k: ("***" if k in CREDENTIAL_FIELDS else v) for k, v in fields.items()}
+
 TEMPLATES_MAP = {
     # Shared
     10: pb.request_login_pb2.RequestLogin,
@@ -287,7 +294,7 @@ class BasePlant(BackgroundTaskMixin):
         Create Request class instance, convert it to bytes and send it to the server
         """
         request = self._build_request(**kwargs)
-        self.logger.debug(f"Sending message {MessageToDict(request)}")
+        self.logger.debug(f"Sending message {redact(MessageToDict(request))}")
 
         template_id = kwargs["template_id"]
         buffer = self._convert_request_to_bytes(request)
@@ -329,7 +336,7 @@ class BasePlant(BackgroundTaskMixin):
         async with try_acquire_lock(self, context=f"send_and_recv_immediate_{kwargs.get('template_id')}"):
 
             request = self._build_request(**kwargs)
-            self.logger.debug(f"Sending message {MessageToDict(request)}")
+            self.logger.debug(f"Sending message {redact(MessageToDict(request))}")
 
             buffer = self._convert_request_to_bytes(request)
             await self.ws.send(buffer)
@@ -354,9 +361,9 @@ class BasePlant(BackgroundTaskMixin):
 
         if len(responses[-1].rp_code) and responses[-1].rp_code[0] != '0':
             if responses[-1].rp_code[0] == '7':
-                self.logger.debug(f"Rithmic returned no data for the request={kwargs}")
+                self.logger.debug(f"Rithmic returned no data for the request={redact(kwargs)}")
                 return []
-            raise RithmicErrorResponse(f"Rithmic returned an error={MessageToDict(responses[-1])} for the request={kwargs}")
+            raise RithmicErrorResponse(f"Rithmic returned an error={MessageToDict(responses[-1])} for the request={redact(kwargs)}")
 
         return responses
 
@@ -383,9 +390,9 @@ class BasePlant(BackgroundTaskMixin):
 
         if len(response.rp_code) and response.rp_code[0] != '0':
             if response.rp_code[0] == '7':
-                self.logger.debug(f"Rithmic returned no data for the request={kwargs}")
+                self.logger.debug(f"Rithmic returned no data for the request={redact(kwargs)}")
                 return response
-            raise RithmicErrorResponse(f"Rithmic returned an error={MessageToDict(response)} for the request={kwargs}")
+            raise RithmicErrorResponse(f"Rithmic returned an error={MessageToDict(response)} for the request={redact(kwargs)}")
 
         return response
 
@@ -541,7 +548,7 @@ class BasePlant(BackgroundTaskMixin):
                             return True
                         request = self.request_manager.requests.get(request_id)
                         self.request_manager.mark_complete(request_id)
-                        raise RithmicErrorResponse(f"Rithmic returned an error={MessageToDict(response)} for the request={request}")
+                        raise RithmicErrorResponse(f"Rithmic returned an error={MessageToDict(response)} for the request={redact(request or {})}")
 
                     else:
                         if response.template_id in [11, 15, 114, 301]:
